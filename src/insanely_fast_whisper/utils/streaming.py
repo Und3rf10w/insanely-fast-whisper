@@ -1,158 +1,148 @@
-import io
 import os
-from datetime import datetime, timedelta
-from queue import Queue
-from time import sleep
-import speech_recognition as sr
-from scipy.io import wavfile
 import numpy as np
+import pyaudio
+import wave
+import threading
+from queue import Queue
+from datetime import datetime, timedelta
+from time import sleep
 import torch
 from rich.progress import Progress, TimeElapsedColumn, BarColumn, TextColumn
 
 
-class AudioBuffer:
-    def __init__(self, max_size=48000 * 30):  # 30 seconds at 48kHz
-        self.buffer = np.array([], dtype=np.float32)
-        self.max_size = max_size
+class AudioStreamer:
+    def __init__(self, sample_rate=16000, chunk_size=1024, channels=1):
+        self.sample_rate = sample_rate
+        self.chunk_size = chunk_size
+        self.channels = channels
+        self.audio = pyaudio.PyAudio()
+        self.stream = None
+        self.audio_queue = Queue()
+        self.is_recording = False
 
-    def add(self, audio_data):
-        self.buffer = np.append(self.buffer, audio_data)
-        if len(self.buffer) > self.max_size:
-            self.buffer = self.buffer[-self.max_size :]
+    def callback(self, in_data, frame_count, time_info, status):
+        if self.is_recording:
+            audio_data = np.frombuffer(in_data, dtype=np.float32)
+            self.audio_queue.put(audio_data)
+        return (in_data, pyaudio.paContinue)
 
-    def get(self):
-        return self.buffer.copy()
+    def start_streaming(self):
+        self.stream = self.audio.open(
+            format=pyaudio.paFloat32,
+            channels=self.channels,
+            rate=self.sample_rate,
+            input=True,
+            frames_per_buffer=self.chunk_size,
+            stream_callback=self.callback,
+        )
+        self.is_recording = True
+        self.stream.start_stream()
 
-
-def setup_microphone(sampling_rate, energy_threshold=400, default_microphone="pulse"):
-    recorder = sr.Recognizer()
-    recorder.energy_threshold = energy_threshold
-    recorder.dynamic_energy_threshold = False
-
-    if os.name == "posix" and default_microphone:
-        for index, name in enumerate(sr.Microphone.list_microphone_names()):
-            if default_microphone in name:
-                source = sr.Microphone(sample_rate=sampling_rate, device_index=index)
-                break
-        else:
-            available_mics = "\n".join(sr.Microphone.list_microphone_names())
-            raise ValueError(
-                f"Microphone '{default_microphone}' not found. Available microphones:\n{available_mics}"
-            )
-    else:
-        source = sr.Microphone(sample_rate=sampling_rate)
-
-    return recorder, source
+    def stop_streaming(self):
+        self.is_recording = False
+        if self.stream:
+            self.stream.stop_stream()
+            self.stream.close()
+        self.audio.terminate()
 
 
 def process_audio_stream(pipe, diarization_pipeline, args):
     """
-    Handles real-time audio streaming, transcription, and diarization.
+    Handles real-time audio streaming, transcription, and optional diarization.
     """
-    sampling_rate = pipe.feature_extractor.sampling_rate
-    data_queue = Queue()
-    audio_buffer = AudioBuffer()
-    phrase_time = None
-    last_sample = bytes()
+    # Set up the same parameters as non-streaming mode
+    ts = "word" if args.timestamp == "word" else True
+    language = None if args.language == "None" else args.language
 
-    # Setup microphone and recorder
-    recorder, source = setup_microphone(
-        sampling_rate,
-        energy_threshold=args.energy_threshold,
-        default_microphone=getattr(args, "default_microphone", "pulse"),
-    )
+    # Construct generate_kwargs the same way as non-streaming mode
+    generate_kwargs = {"task": args.task}
+    if language is not None:
+        generate_kwargs["language"] = language
 
-    def record_callback(_, audio: sr.AudioData) -> None:
-        data = audio.get_raw_data()
-        data_queue.put(data)
+    # Remove task for English-only models
+    if args.model_name.split(".")[-1] == "en":
+        generate_kwargs.pop("task")
 
-    with source:
-        recorder.adjust_for_ambient_noise(source)
-
-    recorder.listen_in_background(
-        source, record_callback, phrase_time_limit=args.record_timeout
-    )
-
-    print("Model loaded and listening. Press Ctrl+C to stop.\n")
-
+    audio_streamer = AudioStreamer(sample_rate=pipe.feature_extractor.sampling_rate)
     transcription = []
+    audio_buffer = []
+    last_process_time = datetime.utcnow()
+
     try:
+        audio_streamer.start_streaming()
+        print("Model loaded and listening. Press Ctrl+C to stop.\n")
+
         while True:
             now = datetime.utcnow()
-            if not data_queue.empty():
-                phrase_complete = False
-                if phrase_time and now - phrase_time > timedelta(
-                    seconds=args.phrase_timeout
-                ):
-                    last_sample = bytes()
-                    phrase_complete = True
-                phrase_time = now
 
-                while not data_queue.empty():
-                    data = data_queue.get()
-                    last_sample += data
+            # Collect audio data
+            while not audio_streamer.audio_queue.empty():
+                audio_data = audio_streamer.audio_queue.get()
+                audio_buffer.extend(audio_data)
 
-                audio_data = sr.AudioData(
-                    last_sample, source.SAMPLE_RATE, source.SAMPLE_WIDTH
-                )
-                wav_data = io.BytesIO(audio_data.get_wav_data())
-                sample_rate, audio_array = wavfile.read(wav_data)
+            # Process if we have enough data or enough time has passed
+            if (
+                len(audio_buffer)
+                >= pipe.feature_extractor.sampling_rate * args.record_timeout
+                or (now - last_process_time).total_seconds() >= args.phrase_timeout
+            ):
 
-                # Add to buffer for diarization
-                audio_buffer.add(audio_array.astype(np.float32) / 32768.0)
+                if len(audio_buffer) > 0:
+                    audio_array = np.array(audio_buffer)
 
-                # Process with both pipelines
-                with Progress(
-                    TextColumn("🤗 [progress.description]{task.description}"),
-                    BarColumn(style="yellow1", pulse_style="white"),
-                    TimeElapsedColumn(),
-                ) as progress:
-                    progress.add_task("[yellow]Processing...", total=None)
-
-                    # Get transcription
-                    outputs = pipe(
-                        audio_array,
-                        chunk_length_s=30,
-                        batch_size=args.batch_size,
-                        generate_kwargs={"task": args.task, "language": args.language},
-                        return_timestamps=True,
-                    )
-
-                    if diarization_pipeline is not None:
-                        # Process diarization on buffered audio
-                        diarization = diarization_pipeline(
-                            {
-                                "waveform": torch.from_numpy(
-                                    audio_buffer.get()
-                                ).unsqueeze(0),
-                                "sample_rate": sampling_rate,
-                            }
+                    with Progress(
+                        TextColumn("🤗 [progress.description]{task.description}"),
+                        BarColumn(style="yellow1", pulse_style="white"),
+                        TimeElapsedColumn(),
+                    ) as progress:
+                        # Transcription
+                        progress.add_task("[yellow]Transcribing...", total=None)
+                        outputs = pipe(
+                            audio_array,
+                            chunk_length_s=30,
+                            batch_size=args.batch_size,
+                            generate_kwargs=generate_kwargs,
+                            return_timestamps=ts,
                         )
 
-                        # Process segments
-                        segments = []
-                        for segment, track, label in diarization.itertracks(
-                            yield_label=True
-                        ):
-                            segments.append(f"[{label}]: {outputs['text'].strip()}")
-
-                        text = "\n".join(segments)
-                    else:
                         text = outputs["text"].strip()
 
-                if phrase_complete:
+                        # Optional diarization
+                        if diarization_pipeline is not None:
+                            progress.add_task("[yellow]Diarizing...", total=None)
+                            diarization = diarization_pipeline(
+                                {
+                                    "waveform": torch.from_numpy(audio_array).unsqueeze(
+                                        0
+                                    ),
+                                    "sample_rate": audio_streamer.sample_rate,
+                                },
+                                num_speakers=args.num_speakers,
+                                min_speakers=args.min_speakers,
+                                max_speakers=args.max_speakers,
+                            )
+
+                            # Process segments with speaker labels
+                            segments = []
+                            for segment, track, label in diarization.itertracks(
+                                yield_label=True
+                            ):
+                                segments.append(f"[{label}]: {text}")
+                            text = "\n".join(segments)
+
                     transcription.append(text)
-                else:
-                    transcription[-1] = text
+                    audio_buffer = []
+                    last_process_time = now
 
-                # Clear the console and show updated transcription
-                os.system("cls" if os.name == "nt" else "clear")
-                for line in transcription:
-                    print(line)
-                print("", end="", flush=True)
+                    # Update display
+                    os.system("cls" if os.name == "nt" else "clear")
+                    for line in transcription:
+                        print(line)
+                    print("", end="", flush=True)
 
-                sleep(0.25)
+            sleep(0.1)
 
     except KeyboardInterrupt:
+        audio_streamer.stop_streaming()
         print("\nTranscription ended.")
         return transcription

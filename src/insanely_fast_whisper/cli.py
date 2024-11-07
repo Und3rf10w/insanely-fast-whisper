@@ -10,7 +10,7 @@ from .utils.result import build_result
 parser = argparse.ArgumentParser(description="Automatic Speech Recognition")
 parser.add_argument(
     "--file-name",
-    required=True,
+    required=False,
     type=str,
     help="Path or URL to the audio file to be transcribed.",
 )
@@ -159,7 +159,7 @@ def main():
         if args.min_speakers > args.max_speakers:
             parser.error("--min-speakers cannot be greater than --max-speakers.")
 
-    if args.live_transcribe and args.file_name != "stream":
+    if args.live_transcribe and args.file_name:
         parser.error("--file-name should not be specified when using --live-transcribe")
 
     pipe = pipeline(
@@ -191,8 +191,16 @@ def main():
     if args.live_transcribe:
         from .utils.streaming import process_audio_stream
 
+        # Set up diarization if requested (moved outside of live-transcribe block)
         diarization_pipeline = None
-        if args.hf_token != "no_token":
+        if args.diarization_model:
+            # if args.hf_token == "no_token":
+            #     raise ValueError(
+            #         "--hf-token is required when using --diarization_model"
+            #     )
+
+            from pyannote.audio import Pipeline
+
             diarization_pipeline = Pipeline.from_pretrained(
                 checkpoint_path=args.diarization_model,
                 use_auth_token=args.hf_token,

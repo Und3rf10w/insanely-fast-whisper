@@ -5,7 +5,7 @@
 groups = ["default"]
 strategy = ["cross_platform", "inherit_metadata"]
 lock_version = "4.4.1"
-content_hash = "sha256:b6cd0b882b782df531874f6d9dbfd625f432470d5083a8c47e10d9b2f4eef06d"
+content_hash = "sha256:41c0693bde5132e42c38e53ed807de082c9318c3328f0f02d71b417493ce6feb"
 
 [[package]]
 name = "accelerate"

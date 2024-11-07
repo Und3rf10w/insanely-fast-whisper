@@ -2,7 +2,7 @@
 
 An opinionated CLI to transcribe Audio files w/ Whisper on-device! Powered by 🤗 *Transformers*, *Optimum* & *flash-attn*
 
-**TL;DR** - Transcribe **150** minutes (2.5 hours) of audio in less than **98** seconds - with [OpenAI's Whisper Large v3](https://huggingface.co/openai/whisper-large-v3). Blazingly fast transcription is now a reality!⚡️
+**TL;DR** - Transcribe **150** minutes (2.5 hours) of audio in less than **98** seconds - with [OpenAI's Whisper Large v3](https://huggingface.co/openai/whisper-large-v3). Now with real-time transcription support! Blazingly fast transcription is now a reality!⚡️
 
 ```
 pipx install insanely-fast-whisper==0.0.15 --force
@@ -50,7 +50,11 @@ If you're installing with `pip`, you can pass the argument directly: `pip instal
 Run inference from any path on your computer:
 
 ```bash
+# For file transcription
 insanely-fast-whisper --file-name <filename or URL>
+
+# For live transcription
+insanely-fast-whisper --live-transcribe
 ```
 *Note: if you are running on macOS, you also need to add `--device-id mps` flag.*
 
@@ -83,6 +87,7 @@ The `insanely-fast-whisper` repo provides an all round support for running Whisp
   -h, --help            show this help message and exit
   --file-name FILE_NAME
                         Path or URL to the audio file to be transcribed.
+  --live-transcribe     Enable live transcription from microphone input
   --device-id DEVICE_ID
                         Device ID for your GPU. Just pass the device number when using CUDA, or "mps" for Macs with Apple Silicon. (default: "0")
   --transcript-path TRANSCRIPT_PATH
@@ -104,11 +109,19 @@ The `insanely-fast-whisper` repo provides an all round support for running Whisp
   --diarization_model DIARIZATION_MODEL
                         Name of the pretrained model/ checkpoint to perform diarization. (default: pyannote/speaker-diarization)
   --num-speakers NUM_SPEAKERS
-                        Specifies the exact number of speakers present in the audio file. Useful when the exact number of participants in the conversation is known. Must be at least 1. Cannot be used together with --min-speakers or --max-speakers. (default: None)
+                        Specifies the exact number of speakers present in the audio file. (default: None)
   --min-speakers MIN_SPEAKERS
-                        Sets the minimum number of speakers that the system should consider during diarization. Must be at least 1. Cannot be used together with --num-speakers. Must be less than or equal to --max-speakers if both are specified. (default: None)
+                        Sets the minimum number of speakers for diarization. (default: None)
   --max-speakers MAX_SPEAKERS
-                        Defines the maximum number of speakers that the system should consider in diarization. Must be at least 1. Cannot be used together with --num-speakers. Must be greater than or equal to --min-speakers if both are specified. (default: None)
+                        Defines the maximum number of speakers for diarization. (default: None)
+
+  # Live Transcription Options
+  --energy-threshold ENERGY_THRESHOLD
+                        Energy level for mic to detect. (default: 400)
+  --record-timeout RECORD_TIMEOUT
+                        How real time the recording is in seconds. (default: 2)
+  --phrase-timeout PHRASE_TIMEOUT
+                        How much empty space between recordings before considering it a new line. (default: 3)
 ```
 
 ## Frequently Asked Questions
@@ -124,6 +137,30 @@ The root cause of this problem is still unknown, however, you can resolve this b
 **How to avoid Out-Of-Memory (OOM) exceptions on Mac?**
 
 The *mps* backend isn't as optimised as CUDA, hence is way more memory hungry. Typically you can run with `--batch-size 4` without any issues (should use roughly 12GB GPU VRAM). Don't forget to set `--device-id mps`.
+
+**How do I use live transcription with speaker diarization?**
+
+To use live transcription with speaker diarization, you'll need to provide your HuggingFace token:
+
+```bash
+insanely-fast-whisper --live-transcribe --hf-token YOUR_TOKEN
+```
+
+This will transcribe speech in real-time and identify different speakers. You can adjust the sensitivity with `--energy-threshold` and the response time with `--record-timeout`.
+
+**Why is my microphone not being detected on Linux?**
+
+On Linux systems, you might need to specify your microphone device explicitly. You can list available microphones with:
+
+```bash
+insanely-fast-whisper --live-transcribe --default-microphone list
+```
+
+Then use the appropriate microphone name:
+
+```bash
+insanely-fast-whisper --live-transcribe --default-microphone YOUR_MIC_NAME
+```
 
 ## How to use Whisper without a CLI?
 

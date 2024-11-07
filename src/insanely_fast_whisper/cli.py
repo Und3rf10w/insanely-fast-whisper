@@ -107,12 +107,40 @@ parser.add_argument(
     type=int,
     help="Defines the maximum number of speakers that the system should consider in diarization. Must be at least 1. Cannot be used together with --num-speakers. Must be greater than or equal to --min-speakers if both are specified. (default: None)",
 )
+parser.add_argument(
+    "--live-transcribe",
+    action="store_true",
+    help="Enable live transcription from microphone input",
+)
+parser.add_argument(
+    "--energy-threshold",
+    default=400,
+    help="Energy level for mic to detect (for live transcription).",
+    type=int,
+)
+parser.add_argument(
+    "--record-timeout",
+    default=2,
+    help="How real time the recording is in seconds (for live transcription).",
+    type=float,
+)
+parser.add_argument(
+    "--phrase-timeout",
+    default=3,
+    help="How much empty space between recordings before we consider it a new line (for live transcription).",
+    type=float,
+)
+
 
 def main():
     args = parser.parse_args()
 
-    if args.num_speakers is not None and (args.min_speakers is not None or args.max_speakers is not None):
-        parser.error("--num-speakers cannot be used together with --min-speakers or --max-speakers.")
+    if args.num_speakers is not None and (
+        args.min_speakers is not None or args.max_speakers is not None
+    ):
+        parser.error(
+            "--num-speakers cannot be used together with --min-speakers or --max-speakers."
+        )
 
     if args.num_speakers is not None and args.num_speakers < 1:
         parser.error("--num-speakers must be at least 1.")
@@ -123,22 +151,33 @@ def main():
     if args.max_speakers is not None and args.max_speakers < 1:
         parser.error("--max-speakers must be at least 1.")
 
-    if args.min_speakers is not None and args.max_speakers is not None and args.min_speakers > args.max_speakers:
+    if (
+        args.min_speakers is not None
+        and args.max_speakers is not None
+        and args.min_speakers > args.max_speakers
+    ):
         if args.min_speakers > args.max_speakers:
             parser.error("--min-speakers cannot be greater than --max-speakers.")
+
+    if args.live_transcribe and args.file_name != "stream":
+        parser.error("--file-name should not be specified when using --live-transcribe")
 
     pipe = pipeline(
         "automatic-speech-recognition",
         model=args.model_name,
         torch_dtype=torch.float16,
         device="mps" if args.device_id == "mps" else f"cuda:{args.device_id}",
-        model_kwargs={"attn_implementation": "flash_attention_2"} if args.flash else {"attn_implementation": "sdpa"},
+        model_kwargs=(
+            {"attn_implementation": "flash_attention_2"}
+            if args.flash
+            else {"attn_implementation": "sdpa"}
+        ),
     )
 
     if args.device_id == "mps":
         torch.mps.empty_cache()
     # elif not args.flash:
-        # pipe.model = pipe.model.to_bettertransformer()
+    # pipe.model = pipe.model.to_bettertransformer()
 
     ts = "word" if args.timestamp == "word" else True
 
@@ -149,35 +188,62 @@ def main():
     if args.model_name.split(".")[-1] == "en":
         generate_kwargs.pop("task")
 
-    with Progress(
-        TextColumn("🤗 [progress.description]{task.description}"),
-        BarColumn(style="yellow1", pulse_style="white"),
-        TimeElapsedColumn(),
-    ) as progress:
-        progress.add_task("[yellow]Transcribing...", total=None)
+    if args.live_transcribe:
+        from .utils.streaming import process_audio_stream
 
-        outputs = pipe(
-            args.file_name,
-            chunk_length_s=30,
-            batch_size=args.batch_size,
-            generate_kwargs=generate_kwargs,
-            return_timestamps=ts,
-        )
+        diarization_pipeline = None
+        if args.hf_token != "no_token":
+            diarization_pipeline = Pipeline.from_pretrained(
+                checkpoint_path=args.diarization_model,
+                use_auth_token=args.hf_token,
+            )
+            diarization_pipeline.to(
+                torch.device(
+                    "mps" if args.device_id == "mps" else f"cuda:{args.device_id}"
+                )
+            )
 
-    if args.hf_token != "no_token":
-        speakers_transcript = diarize(args, outputs)
-        with open(args.transcript_path, "w", encoding="utf8") as fp:
-            result = build_result(speakers_transcript, outputs)
-            json.dump(result, fp, ensure_ascii=False)
+        transcription = process_audio_stream(pipe, diarization_pipeline, args)
 
-        print(
-            f"Voila!✨ Your file has been transcribed & speaker segmented go check it out over here 👉 {args.transcript_path}"
-        )
+        # Save transcription if requested
+        if args.transcript_path:
+            with open(args.transcript_path, "w", encoding="utf8") as fp:
+                result = build_result(
+                    [], {"chunks": [], "text": "\n".join(transcription)}
+                )
+                json.dump(result, fp, ensure_ascii=False)
+
+            print(f"\nTranscription saved to: {args.transcript_path}")
     else:
-        with open(args.transcript_path, "w", encoding="utf8") as fp:
-            result = build_result([], outputs)
-            json.dump(result, fp, ensure_ascii=False)
+        with Progress(
+            TextColumn("🤗 [progress.description]{task.description}"),
+            BarColumn(style="yellow1", pulse_style="white"),
+            TimeElapsedColumn(),
+        ) as progress:
+            progress.add_task("[yellow]Transcribing...", total=None)
 
-        print(
-            f"Voila!✨ Your file has been transcribed go check it out over here 👉 {args.transcript_path}"
-        )
+            outputs = pipe(
+                args.file_name,
+                chunk_length_s=30,
+                batch_size=args.batch_size,
+                generate_kwargs=generate_kwargs,
+                return_timestamps=ts,
+            )
+
+        if args.hf_token != "no_token":
+            speakers_transcript = diarize(args, outputs)
+            with open(args.transcript_path, "w", encoding="utf8") as fp:
+                result = build_result(speakers_transcript, outputs)
+                json.dump(result, fp, ensure_ascii=False)
+
+            print(
+                f"Voila!✨ Your file has been transcribed & speaker segmented go check it out over here 👉 {args.transcript_path}"
+            )
+        else:
+            with open(args.transcript_path, "w", encoding="utf8") as fp:
+                result = build_result([], outputs)
+                json.dump(result, fp, ensure_ascii=False)
+
+            print(
+                f"Voila!✨ Your file has been transcribed go check it out over here 👉 {args.transcript_path}"
+            )

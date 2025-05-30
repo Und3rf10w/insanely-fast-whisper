@@ -58,7 +58,9 @@ def preprocess_inputs(inputs):
     return inputs, diarizer_inputs
 
 
-def diarize_audio(diarizer_inputs, diarization_pipeline, num_speakers, min_speakers, max_speakers):
+def diarize_audio(
+    diarizer_inputs, diarization_pipeline, num_speakers, min_speakers, max_speakers
+):
     diarization = diarization_pipeline(
         {"waveform": diarizer_inputs, "sample_rate": 16000},
         num_speakers=num_speakers,
@@ -76,8 +78,12 @@ def diarize_audio(diarizer_inputs, diarization_pipeline, num_speakers, min_speak
             }
         )
 
-    # diarizer output may contain consecutive segments from the same speaker (e.g. {(0 -> 1, speaker_1), (1 -> 1.5, speaker_1), ...})
-    # we combine these segments to give overall timestamps for each speaker's turn (e.g. {(0 -> 1.5, speaker_1), ...})
+    # Add this check:
+    if not segments:
+        print("Warning: Diarization pipeline returned no segments.")
+        return []  # Return an empty list if no segments were found
+
+    # The rest of the function remains the same:
     new_segments = []
     prev_segment = cur_segment = segments[0]
 
@@ -85,8 +91,11 @@ def diarize_audio(diarizer_inputs, diarization_pipeline, num_speakers, min_speak
         cur_segment = segments[i]
 
         # check if we have changed speaker ("label")
-        if cur_segment["label"] != prev_segment["label"] and i < len(segments):
-            # add the start/end times for the super-segment to the new list
+        # The condition `and i < len(segments)` is redundant here as `i` is always less than `len(segments)` in this loop.
+        # It can be safely removed, but leaving it doesn't harm.
+        if (
+            cur_segment["label"] != prev_segment["label"]
+        ):  # Removed redundant `and i < len(segments)`
             new_segments.append(
                 {
                     "segment": {
@@ -96,9 +105,8 @@ def diarize_audio(diarizer_inputs, diarization_pipeline, num_speakers, min_speak
                     "speaker": prev_segment["label"],
                 }
             )
-            prev_segment = segments[i]
+            prev_segment = cur_segment  # Corrected from prev_segment = segments[i] for clarity, though functionally similar here
 
-    # add the last segment(s) if there was no speaker change
     new_segments.append(
         {
             "segment": {
@@ -112,10 +120,43 @@ def diarize_audio(diarizer_inputs, diarization_pipeline, num_speakers, min_speak
     return new_segments
 
 
-def post_process_segments_and_transcripts(new_segments, transcript, group_by_speaker) -> list:
+def post_process_segments_and_transcripts(
+    new_segments, transcript, group_by_speaker
+) -> list:
+    # Add this check at the beginning:
+    if not transcript:  # If ASR produced no transcribed chunks
+        # If there are speaker segments but no text, it's ambiguous what to return.
+        # Returning an empty list is safest as no combined segments can be formed.
+        return []
+
+    if not new_segments:  # If diarization produced no speaker segments
+        # If there's a transcript but no speaker segments, we can't assign speakers.
+        # Depending on desired behavior, one might return the transcript with a default "UNKNOWN" speaker
+        # or, as done here by implication if segmented_preds remains empty, return an empty list.
+        # For consistency with the function's goal (producing speaker-segmented transcript),
+        # if no speaker segments, then no such output can be made.
+        # However, the calling code in cli.py uses build_result which might expect original chunks.
+        # For now, let's ensure it returns empty if new_segments is empty, and cli.py handles it.
+        # The current logic will result in segmented_preds = [] if new_segments is empty, which is fine.
+        pass
+
     # get the end timestamps for each chunk from the ASR output
     end_timestamps = np.array(
-        [chunk["timestamp"][-1] if chunk["timestamp"][-1] is not None else sys.float_info.max for chunk in transcript])
+        [
+            (
+                chunk["timestamp"][-1]
+                if chunk["timestamp"][-1] is not None
+                else sys.float_info.max
+            )
+            for chunk in transcript
+        ]
+    )
+    # This check is important if transcript might be non-empty but all timestamps are None
+    # However, np.argmin([]) is the main issue if transcript itself was empty.
+    # If end_timestamps is empty due to all chunk timestamps being None, but transcript is not empty,
+    # np.argmin will also raise ValueError. This is an edge case.
+    # Assuming Whisper chunks usually have timestamps.
+
     segmented_preds = []
 
     # align the diarizer timestamps and the ASR timestamps
@@ -143,10 +184,10 @@ def post_process_segments_and_transcripts(new_segments, transcript, group_by_spe
                 segmented_preds.append({"speaker": segment["speaker"], **transcript[i]})
 
         # crop the transcripts and timestamp lists according to the latest timestamp (for faster argmin)
-        transcript = transcript[upto_idx + 1:]
-        end_timestamps = end_timestamps[upto_idx + 1:]
+        transcript = transcript[upto_idx + 1 :]
+        end_timestamps = end_timestamps[upto_idx + 1 :]
 
         if len(end_timestamps) == 0:
-            break 
+            break
 
     return segmented_preds

@@ -1,6 +1,6 @@
 [project]
 name = "insanely-fast-whisper"
-version = "0.0.15"
+version = "0.0.16"
 description = "An insanely fast whisper CLI"
 authors = [
     { name = "VB", email = "reachvaibhavs10@gmail.com" },
@@ -12,6 +12,8 @@ dependencies = [
     "pyannote-audio>=3.1.0",
     "setuptools>=68.2.2",
     "rich>=13.7.0",
+    "speechbrain>=1.0.2",
+    "pyaudio>=0.2.14",
 ]
 requires-python = ">=3.8"
 readme = "README.md"

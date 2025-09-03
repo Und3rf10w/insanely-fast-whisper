@@ -163,3 +163,7 @@ cython_debug/
 
 .vscode/
 .idea/
+
+# You can store the huggingface models locally in models
+!models/.gitkeep
+models/**
